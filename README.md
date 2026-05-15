@@ -1,0 +1,1 @@
+Inicializacija git repozitorija
