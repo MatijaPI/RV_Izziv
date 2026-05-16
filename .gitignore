@@ -1,5 +1,13 @@
+# Python cache datoteke
 __pycache__/
 *.pyc
 .DS_Store
+
+# Virtualna okolja
 .venv/
 venv/
+
+# Vhodni in izhodni podatki
+data/*
+!data/.gitkeep
+output/
