@@ -11,3 +11,7 @@ venv/
 data/*
 !data/.gitkeep
 output/
+
+# Modeli (mediapipe)
+models/*
+!models/.gitkeep
