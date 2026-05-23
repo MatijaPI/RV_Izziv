@@ -18,3 +18,4 @@ Testni videi morajo biti shranjeni v mapi `data/`. Izhodni posnetki in logi se s
 ## Opravljeni koraki
 - **Korak 1:** Vzpostavitev strukture projekta, Docker okolja in repozitorija.
 - **Korak 2:** Implementacija branja in zapisovanja videa v "headless" načinu, popravek Dockerja. Uspešen test branja in shranjevanja videa.
+- **Faza 3:** Dodana integracija MediaPipe – avtomatski prenos modela in zaznavanje ter izris sklepov in povezav roke v vsak okvir izhodnega videa.
