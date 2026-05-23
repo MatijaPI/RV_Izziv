@@ -56,12 +56,24 @@ def process_video(input_path, output_path):
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps == 0 or fps != fps:
         fps = 30.0
+    dt = 1.0 / fps
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     print(f"Zacetek obdelave videa: {input_path}")
     frame_count = 0
+
+    # Spremenljivke za kinematiko
+    prev_pos = None
+    prev_vel = 0.0
+    path_sum = 0.0
+
+    # Seznami za časovno vrsto (čas, pot, hitrost, pospešek)
+    times = []
+    paths = []
+    vels = []
+    accs = []
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -75,7 +87,47 @@ def process_video(input_path, output_path):
         # Detekcija
         detection_result = detector.detect(mp_image)
 
-        # Izris detekcij
+        # Izris detekcij in kinematika
+        wrist_found = False
+        if detection_result.hand_landmarks:
+            for hand_landmarks in detection_result.hand_landmarks:
+                # Začnemo z levo roko (oz. prvo detektirano)
+                wrist = hand_landmarks[0]
+                curr_pos = (wrist.x * width, wrist.y * height)
+                wrist_found = True
+                
+                # Izračun kin. podatkov
+                if prev_pos is not None:
+                    dx = curr_pos[0] - prev_pos[0]
+                    dy = curr_pos[1] - prev_pos[1]
+                    d = (dx**2 + dy**2)**0.5
+                else:
+                    d = 0.0
+                path_sum += d
+                curr_vel = d / dt if prev_pos is not None else 0.0
+                acc = (curr_vel - prev_vel) / dt if prev_pos is not None else 0.0
+
+                # Shranjevanje rezultatov
+                t = frame_count * dt
+                times.append(t)
+                paths.append(path_sum)
+                vels.append(curr_vel)
+                accs.append(acc)
+
+                prev_pos = curr_pos
+                prev_vel = curr_vel
+
+                break # Upoštevamo samo prvo zaznano roko
+
+        if not wrist_found:
+            # Če ni roke, shranimo prejšnje podatke (ostanejo enaki)
+            t = frame_count * dt
+            times.append(t)
+            paths.append(path_sum)
+            vels.append(0.0)
+            accs.append(0.0)
+
+        # Izris detekcij na sliko
         if detection_result.hand_landmarks:
             for hand_landmarks in detection_result.hand_landmarks:
                 # Izris povezav
@@ -98,11 +150,19 @@ def process_video(input_path, output_path):
         f.write(f"Izhodna datoteka: {output_path}\n")
         f.write(f"Število okvirjev: {frame_count}\n")
 
+    # Zapis kinematičnih podatkov
+    kin_path = os.path.join(LOG_DIR, os.path.splitext(os.path.basename(output_path))[0] + "_kinematika.csv")
+    with open(kin_path, "w", encoding="utf-8") as f:
+        f.write("cas[s];pot[px];hitrost[px/s];pospesek[px/s2]\n")
+        for t, s, v, a in zip(times, paths, vels, accs):
+            f.write(f"{t:.2f};{s:.2f};{v:.2f};{a:.2f}\n")
+
     # Zapre video
     cap.release()
     out.release()
     print(f"Konec obdelave. Prebranih okvirjev: {frame_count}")
     print(f"Video shranjen v: {output_path}")
+    print(f"Kinematika shranjena v: {kin_path}")
 
 def get_mp4_files_recursively(data_dir):
     # Poišče vse .mp4 v vseh podmapah data_dir
