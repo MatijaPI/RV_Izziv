@@ -79,10 +79,10 @@ def process_video(input_path, output_path):
                     p1 = hand_landmarks[connection[0]]
                     p2 = hand_landmarks[connection[1]]
                     cv2.line(frame, (int(p1.x * width), int(p1.y * height)), 
-                                    (int(p2.x * width), int(p2.y * height)), (0, 255, 0), 2)
+                                    (int(p2.x * width), int(p2.y * height)), (255, 255, 255), 2)
                 
                 for landmark in hand_landmarks:
-                    cv2.circle(frame, (int(landmark.x * width), int(landmark.y * height)), 4, (0, 0, 255), -1)
+                    cv2.circle(frame, (int(landmark.x * width), int(landmark.y * height)), 4, (0, 0, 0), -1)
 
         out.write(frame)
         frame_count += 1
