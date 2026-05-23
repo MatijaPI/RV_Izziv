@@ -15,6 +15,17 @@ Za zagon z Dockerjem (lokalno):
 
 Testni videi morajo biti shranjeni v mapi `data/`. Izhodni posnetki in logi se shranjujejo v mapo `output/`.
 
+## Uporaba CLI
+
+Obdelava vseh videov:
+python src/main.py -i all
+
+Obdelava posameznega videa:
+python src/main.py -i test.mp4
+
+Izhod na poljubno ime/datoteko:
+python src/main.py -i test.mp4 -o mojnoviizhod.mp4
+
 ## Opravljeni koraki
 - **Korak 1:** Vzpostavitev strukture projekta, Docker okolja in repozitorija.
 - **Korak 2:** Implementacija branja in zapisovanja videa v "headless" načinu, popravek Dockerja. Uspešen test branja in shranjevanja videa.
