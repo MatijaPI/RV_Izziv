@@ -6,13 +6,15 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-# Poti do videov in modelov
+# Poti do videov, modelov in logov
 DATA_DIR = "data"
 OUTPUT_DIR = "output/videos"
+LOG_DIR = "output/logs"
 MODEL_DIR = "models"
 MODEL_PATH = os.path.join(MODEL_DIR, "hand_landmarker.task")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 # Povezave med značilkami roke
@@ -89,6 +91,13 @@ def process_video(input_path, output_path):
         out.write(frame)
         frame_count += 1
 
+    # Zapis dnevnika obdelave
+    log_path = os.path.join(LOG_DIR, os.path.splitext(os.path.basename(output_path))[0] + ".log")
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write(f"Obdelan video: {input_path}\n")
+        f.write(f"Izhodna datoteka: {output_path}\n")
+        f.write(f"Število okvirjev: {frame_count}\n")
+
     # Zapre video
     cap.release()
     out.release()
@@ -134,7 +143,7 @@ if __name__ == "__main__":
             exit(1)
         # Če je output podan, uporabimo tistega, sicer generiramo ime
         if args.output:
-            out_path = args.output
+            out_path = os.path.join(OUTPUT_DIR, args.output)
         else:
             in_basename = os.path.splitext(os.path.basename(in_path))[0]
             out_name = in_basename + "_obdelan.mp4"
