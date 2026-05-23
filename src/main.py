@@ -1,5 +1,6 @@
 import cv2
 import os
+import argparse
 import urllib.request
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -75,12 +76,13 @@ def process_video(input_path, output_path):
         # Izris detekcij
         if detection_result.hand_landmarks:
             for hand_landmarks in detection_result.hand_landmarks:
+                # Izris povezav
                 for connection in HAND_CONNECTIONS:
                     p1 = hand_landmarks[connection[0]]
                     p2 = hand_landmarks[connection[1]]
                     cv2.line(frame, (int(p1.x * width), int(p1.y * height)), 
                                     (int(p2.x * width), int(p2.y * height)), (255, 255, 255), 2)
-                
+                # Izris ključnih točk
                 for landmark in hand_landmarks:
                     cv2.circle(frame, (int(landmark.x * width), int(landmark.y * height)), 4, (0, 0, 0), -1)
 
@@ -93,12 +95,48 @@ def process_video(input_path, output_path):
     print(f"Konec obdelave. Prebranih okvirjev: {frame_count}")
     print(f"Video shranjen v: {output_path}")
 
-# Main
-if __name__ == "__main__":
-    test_input = os.path.join(DATA_DIR, "test.mp4")
-    test_output = os.path.join(OUTPUT_DIR, "test_izhod.mp4")
+def get_mp4_files_recursively(data_dir):
+    # Poišče vse .mp4 v vseh podmapah data_dir
+    mp4_files = []
+    for root, dirs, files in os.walk(data_dir):
+        for f in files:
+            if f.lower().endswith('.mp4'):
+                mp4_files.append(os.path.join(root, f))
+    return mp4_files
 
-    if os.path.exists(test_input):
-        process_video(test_input, test_output)
+# Glavna funkcija in CLI argumenti
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Obdelava .mp4 video datotek za 9HPT z MediaPipe hand tracking."
+    )
+    parser.add_argument("--input", "-i", required=True, help="Ime ali pot do vhodne .mp4 datoteke ali 'all' za obdelavo vseh *.mp4 v data/")
+    parser.add_argument("--output", "-o", required=False, help="Ime ali pot za izhodno .mp4 datoteko (uporabi le pri obdelavi ene datoteke)")
+
+    args = parser.parse_args()
+
+    if args.input.lower() == "all":
+        files = get_mp4_files_recursively(DATA_DIR)
+        if not files:
+            print(f"V mapi '{DATA_DIR}' ni nobene mp4 datoteke za obdelavo.")
+        for in_path in files:
+            in_basename = os.path.splitext(os.path.basename(in_path))[0]
+            out_name = in_basename + "_obdelan.mp4"
+            out_path = os.path.join(OUTPUT_DIR, out_name)
+            process_video(in_path, out_path)
     else:
-        print(f"Za testiranje dodajte video z imenom 'test.mp4' v mapo '{DATA_DIR}'.")
+        # Poišči absolutno ali relativno pot, ali pa v data/
+        if os.path.isfile(args.input):
+            in_path = args.input
+        else:
+            in_path = os.path.join(DATA_DIR, args.input)
+        if not os.path.isfile(in_path):
+            print(f"Napaka: Ne najdem datoteke '{args.input}'!")
+            exit(1)
+        # Če je output podan, uporabimo tistega, sicer generiramo ime
+        if args.output:
+            out_path = args.output
+        else:
+            in_basename = os.path.splitext(os.path.basename(in_path))[0]
+            out_name = in_basename + "_obdelan.mp4"
+            out_path = os.path.join(OUTPUT_DIR, out_name)
+        process_video(in_path, out_path)
