@@ -34,32 +34,32 @@ def download_model():
 
 def draw_kinematic_hud(frame, path, vel, acc, path_hist, vel_hist, acc_hist):
     # Risanje elegantnega overlay-a in mini grafov za kinematične parametre
-    overlay_w = 450
-    overlay_h = 80
+    overlay_w = 180
+    overlay_h = 150
     margin = 12
-    corner_x, corner_y = 12, 388
+    corner_x, corner_y = 12, 320
     graph_h = 30
     num_points = len(path_hist)
     alpha = 0.8 # prosojnost ozadja
     
-    # Ustvari prosojno ozadje (nice academic look)
+    # Ustvari prosojno ozadje
     overlay = frame.copy()
     cv2.rectangle(overlay, (corner_x, corner_y), 
                   (corner_x + overlay_w, corner_y + overlay_h), 
                   (245, 245, 245), -1)
     frame = cv2.addWeighted(overlay, alpha, frame, 1-alpha, 0)
     
-    # Akademska pisava in barve
+    # Izpis kinematike
     font = cv2.FONT_HERSHEY_TRIPLEX
     color_txt = (30, 30, 30)
-    cv2.putText(frame, f"Pot: {path:.1f} px", (corner_x + margin, corner_y + 24), font, 0.55, color_txt, 1, cv2.LINE_AA)
-    cv2.putText(frame, f"Hitrost: {vel:.1f} px/s", (corner_x + margin, corner_y + 44), font, 0.55, color_txt, 1, cv2.LINE_AA)
-    cv2.putText(frame, f"Pospesek: {acc:.1f} px/s2", (corner_x + margin, corner_y + 64), font, 0.55, color_txt, 1, cv2.LINE_AA)
+    cv2.putText(frame, f"x: {path:.1f} px", (corner_x + margin, corner_y + 104), font, 0.55, color_txt, 1, cv2.LINE_AA)
+    cv2.putText(frame, f"v: {vel:.1f} px/s", (corner_x + margin, corner_y + 124), font, 0.55, color_txt, 1, cv2.LINE_AA)
+    cv2.putText(frame, f"a: {acc:.1f} px/s2", (corner_x + margin, corner_y + 144), font, 0.55, color_txt, 1, cv2.LINE_AA)
     
     # Real-time mini grafi (pot - črna, hitrost - modra, pospešek - rdeča)
-    graph_x0 = corner_x + 320
+    graph_x0 = corner_x + margin
     graph_y0 = corner_y + 40
-    graph_w = overlay_w - 140
+    graph_w = overlay_w - 24
     # Normaliziraj
     def normalize(vals): return [(v - np.min(vals))/(np.max(vals) - np.min(vals) + 1e-5) if len(vals) > 1 else 0.5 for v in vals]
     path_norm = normalize(path_hist)
@@ -73,9 +73,9 @@ def draw_kinematic_hud(frame, path, vel, acc, path_hist, vel_hist, acc_hist):
         cv2.line(frame, (graph_x0 + i-1, graph_y0+18 - int(vel_norm[i-1]*graph_h)), 
                         (graph_x0 + i,   graph_y0+18 - int(vel_norm[i]*graph_h)), (80,70,200), 1)
         # Pospešek
-        cv2.line(frame, (graph_x0 + i-1, graph_y0+36 - int(acc_norm[i-1]*graph_h)), 
-                        (graph_x0 + i,   graph_y0+36 - int(acc_norm[i]*graph_h)), (150,40,60), 1)
-    # Oznake osi (čiist akademsko)
+        cv2.line(frame, (graph_x0 + i-1, graph_y0+45 - int(acc_norm[i-1]*graph_h)), 
+                        (graph_x0 + i,   graph_y0+45 - int(acc_norm[i]*graph_h)), (150,40,60), 1)
+    # Oznake osi
     cv2.putText(frame, "x", (graph_x0-5, graph_y0-2), font, 0.37, (30,30,30), 1, cv2.LINE_AA)
     cv2.putText(frame, "v",   (graph_x0-5, graph_y0+18), font, 0.37, (80,70,200), 1, cv2.LINE_AA)
     cv2.putText(frame, "a",   (graph_x0-5, graph_y0+36), font, 0.37, (150,40,60), 1, cv2.LINE_AA)
