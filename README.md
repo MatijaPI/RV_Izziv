@@ -32,3 +32,5 @@ python src/main.py -i test.mp4 -o mojnoviizhod.mp4
 - **Korak 3:** Dodana integracija MediaPipe – avtomatski prenos modela in zaznavanje ter izris sklepov in povezav roke v vsak okvir izhodnega videa.
 - **Korak 4:** Podpora za ukazno vrstico (`--input`, `--output`) ter procesiranje posameznega ali vseh videov v strukturi data/.
 - **Korak 5:** Zapisovanje dnevnika procesiranja za vsak video v mapo `output/logs/` (ime loga sledi izhodnemu videu), kar omogoča sledljivost ter enostavno preverjanje uspešne obdelave.
+- **Korak 6:** Izračun in izvoz časovnih vrst poti, hitrosti in pospeška zapestja v CSV.
+- **Korak 7:** Real-time prikaz poti, hitrosti in pospeška z mini grafi v overlay-ju na izhodnem videu.  
