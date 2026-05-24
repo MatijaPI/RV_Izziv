@@ -5,6 +5,8 @@ import urllib.request
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+from collections import deque
+import numpy as np
 
 # Poti do videov, modelov in logov
 DATA_DIR = "data"
@@ -29,6 +31,55 @@ def download_model():
         url = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
         urllib.request.urlretrieve(url, MODEL_PATH)
         print("Prenos uspesen.")
+
+def draw_kinematic_hud(frame, path, vel, acc, path_hist, vel_hist, acc_hist):
+    # Risanje elegantnega overlay-a in mini grafov za kinematične parametre
+    overlay_w = 450
+    overlay_h = 80
+    margin = 12
+    corner_x, corner_y = 12, 388
+    graph_h = 30
+    num_points = len(path_hist)
+    alpha = 0.8 # prosojnost ozadja
+    
+    # Ustvari prosojno ozadje (nice academic look)
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (corner_x, corner_y), 
+                  (corner_x + overlay_w, corner_y + overlay_h), 
+                  (245, 245, 245), -1)
+    frame = cv2.addWeighted(overlay, alpha, frame, 1-alpha, 0)
+    
+    # Akademska pisava in barve
+    font = cv2.FONT_HERSHEY_TRIPLEX
+    color_txt = (30, 30, 30)
+    cv2.putText(frame, f"Pot: {path:.1f} px", (corner_x + margin, corner_y + 24), font, 0.55, color_txt, 1, cv2.LINE_AA)
+    cv2.putText(frame, f"Hitrost: {vel:.1f} px/s", (corner_x + margin, corner_y + 44), font, 0.55, color_txt, 1, cv2.LINE_AA)
+    cv2.putText(frame, f"Pospesek: {acc:.1f} px/s2", (corner_x + margin, corner_y + 64), font, 0.55, color_txt, 1, cv2.LINE_AA)
+    
+    # Real-time mini grafi (pot - črna, hitrost - modra, pospešek - rdeča)
+    graph_x0 = corner_x + 320
+    graph_y0 = corner_y + 40
+    graph_w = overlay_w - 140
+    # Normaliziraj
+    def normalize(vals): return [(v - np.min(vals))/(np.max(vals) - np.min(vals) + 1e-5) if len(vals) > 1 else 0.5 for v in vals]
+    path_norm = normalize(path_hist)
+    vel_norm = normalize(vel_hist)
+    acc_norm = normalize(acc_hist)
+    for i in range(1, num_points):
+        # Pot
+        cv2.line(frame, (graph_x0 + i-1, graph_y0 - int(path_norm[i-1]*graph_h)), 
+                        (graph_x0 + i,   graph_y0 - int(path_norm[i]*graph_h)), (30,30,30), 1)
+        # Hitrost
+        cv2.line(frame, (graph_x0 + i-1, graph_y0+18 - int(vel_norm[i-1]*graph_h)), 
+                        (graph_x0 + i,   graph_y0+18 - int(vel_norm[i]*graph_h)), (80,70,200), 1)
+        # Pospešek
+        cv2.line(frame, (graph_x0 + i-1, graph_y0+36 - int(acc_norm[i-1]*graph_h)), 
+                        (graph_x0 + i,   graph_y0+36 - int(acc_norm[i]*graph_h)), (150,40,60), 1)
+    # Oznake osi (čiist akademsko)
+    cv2.putText(frame, "x", (graph_x0-5, graph_y0-2), font, 0.37, (30,30,30), 1, cv2.LINE_AA)
+    cv2.putText(frame, "v",   (graph_x0-5, graph_y0+18), font, 0.37, (80,70,200), 1, cv2.LINE_AA)
+    cv2.putText(frame, "a",   (graph_x0-5, graph_y0+36), font, 0.37, (150,40,60), 1, cv2.LINE_AA)
+    return frame
 
 def process_video(input_path, output_path):
     download_model()
@@ -69,11 +120,15 @@ def process_video(input_path, output_path):
     prev_vel = 0.0
     path_sum = 0.0
 
-    # Seznami za časovno vrsto (čas, pot, hitrost, pospešek)
+    # Seznami za časovno vrsto (čas, pot, hitrost, pospešek), za izpis in graf
     times = []
     paths = []
     vels = []
     accs = []
+    hist_len = 100
+    path_hist = deque(maxlen=hist_len)
+    vel_hist = deque(maxlen=hist_len)
+    acc_hist = deque(maxlen=hist_len)
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -95,7 +150,7 @@ def process_video(input_path, output_path):
                 wrist = hand_landmarks[0]
                 curr_pos = (wrist.x * width, wrist.y * height)
                 wrist_found = True
-                
+
                 # Izračun kin. podatkov
                 if prev_pos is not None:
                     dx = curr_pos[0] - prev_pos[0]
@@ -113,6 +168,9 @@ def process_video(input_path, output_path):
                 paths.append(path_sum)
                 vels.append(curr_vel)
                 accs.append(acc)
+                path_hist.append(path_sum)
+                vel_hist.append(curr_vel)
+                acc_hist.append(acc)
 
                 prev_pos = curr_pos
                 prev_vel = curr_vel
@@ -126,6 +184,9 @@ def process_video(input_path, output_path):
             paths.append(path_sum)
             vels.append(0.0)
             accs.append(0.0)
+            path_hist.append(path_sum)
+            vel_hist.append(0.0)
+            acc_hist.append(0.0)
 
         # Izris detekcij na sliko
         if detection_result.hand_landmarks:
@@ -139,6 +200,9 @@ def process_video(input_path, output_path):
                 # Izris ključnih točk
                 for landmark in hand_landmarks:
                     cv2.circle(frame, (int(landmark.x * width), int(landmark.y * height)), 4, (0, 0, 0), -1)
+
+        # Izris overlay za kinematiko (HUD z napisi in real-time mini grafi)
+        frame = draw_kinematic_hud(frame, paths[-1], vels[-1], accs[-1], path_hist, vel_hist, acc_hist)
 
         out.write(frame)
         frame_count += 1
