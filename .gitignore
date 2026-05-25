@@ -15,3 +15,9 @@ output/
 # Modeli (mediapipe)
 models/*
 !models/.gitkeep
+
+# Kalibracijske slike
+calibration/left/*
+calibration/mid/*
+calibration/right/*
+calibration/debug/*
