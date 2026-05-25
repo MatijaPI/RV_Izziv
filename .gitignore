@@ -15,3 +15,7 @@ output/
 # Modeli (mediapipe)
 models/*
 !models/.gitkeep
+
+# Kalibracijske konfiguracije (generirane)
+calibration/conf/*
+!calibration/conf/.gitkeep
