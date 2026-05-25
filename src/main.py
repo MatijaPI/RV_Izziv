@@ -21,6 +21,12 @@ except ImportError:
     print("[OPOZORILO] matplotlib ni nameščen – grafi ne bodo shranjeni.")
     print("  Namestite z: pip install matplotlib")
 
+try:
+    from scipy.signal import savgol_filter
+    SCIPY_OK = True
+except ImportError:
+    SCIPY_OK = False
+
 # ==============================================================================
 # KONSTANTE IN KONFIGURACIJA
 # ==============================================================================
@@ -53,9 +59,9 @@ HAND_CONNECTIONS = [
 CAMERA_MAP = {"camP_0":"left","camP_1":"mid","camP_2":"right"}
 
 CAMERA_ROI = {
-    "left":  (0.25, 0.05, 0.75, 0.85),
-    "mid":   (0.25, 0.10, 0.75, 0.80),
-    "right": (0.20, 0.15, 0.75, 0.80),
+    "left":  (0.25, 0.05, 0.75, 0.80),
+    "mid":   (0.25, 0.10, 0.75, 0.75),
+    "right": (0.20, 0.15, 0.75, 0.75),
     None:    (1.0,  1.0,  1.0,  1.0),
 }
 
@@ -72,26 +78,138 @@ def _dist2d(a, b):
 
 
 # ==============================================================================
+# GAUSSOV GLAJILNIK POLOŽAJEV (kavzalni, brez zakasnitve)
+# ==============================================================================
+
+class KinematicSmoother:
+    """
+    Kavzalno Gaussovo glajenje položajev v realnem času.
+
+    Vzdržuje okno zadnjih window_size položajev in vrne tehtano povprečje
+    z Gaussovimi utežmi (center okna = najnovejši vzorec).
+
+    Parametri:
+        sigma       – standardna deviacija Gaussove porazdelitve v okvirjih
+                      (večja vrednost = bolj gladko, a manj odzivno)
+        window_size – dolžina okna (privzeto: int(4*sigma)+1, vsaj 3)
+        method      – 'gauss' (privzeto) ali 'savgol' (zahteva scipy)
+    """
+
+    def __init__(self, sigma=1.5, method="gauss"):
+        self.sigma  = max(sigma, 0.1)
+        self.method = method if (method == "savgol" and SCIPY_OK) else "gauss"
+
+        # Dolžina okna – liho število, vsaj 3
+        ws = max(3, int(4 * self.sigma) + 1)
+        if ws % 2 == 0:
+            ws += 1
+        self.window_size = ws
+
+        # Gaussove uteži (indeks 0 = najstarejši, -1 = najnovejši)
+        idxs      = np.arange(self.window_size)
+        center    = self.window_size - 1          # uteži naraščajo proti koncu
+        raw_w     = np.exp(-0.5 * ((idxs - center) / self.sigma) ** 2)
+        self.weights = raw_w / raw_w.sum()        # normalizacija
+
+        # Krožni medpomnilnik za x in y ločeno
+        self._buf_x = deque(maxlen=self.window_size)
+        self._buf_y = deque(maxlen=self.window_size)
+
+    def update(self, pos):
+        """
+        Posodobi okno z novo točko in vrne zglajen položaj.
+        pos: (x, y) v pikslih
+        """
+        self._buf_x.append(pos[0])
+        self._buf_y.append(pos[1])
+
+        n = len(self._buf_x)
+        if n < 2:
+            return pos  # premalo vzorcev – vrni nespremenjeno
+
+        # Prilagodi uteži na dejansko dolžino okna (na začetku videa)
+        if n < self.window_size:
+            w = self.weights[-n:]
+            w = w / w.sum()
+        else:
+            w = self.weights
+
+        sx = float(np.dot(w, list(self._buf_x)))
+        sy = float(np.dot(w, list(self._buf_y)))
+        return (sx, sy)
+
+    def smooth_series_postprocess(self, series):
+        """
+        Naknadna (post-process) obdelava celotne serije z Gaussian ali Savitzky-Golay.
+        Uporablja se za grafe po koncu videa – ne vpliva na vrednosti v videu.
+        Vrne numpy array enake dolžine.
+        """
+        arr = np.array(series, dtype=np.float64)
+        if len(arr) < 5:
+            return arr
+
+        if self.method == "savgol" and SCIPY_OK:
+            wl = min(self.window_size, len(arr))
+            if wl % 2 == 0:
+                wl -= 1
+            wl = max(wl, 5)
+            return savgol_filter(arr, window_length=wl, polyorder=3)
+        else:
+            # Gaussov filter (scipy.ndimage.gaussian_filter1d ni potreben –
+            # implementiramo z scipy-neodvisno konvolucijo)
+            k  = int(3 * self.sigma)
+            xs = np.arange(-k, k + 1)
+            kernel = np.exp(-0.5 * (xs / self.sigma) ** 2)
+            kernel /= kernel.sum()
+            return np.convolve(arr, kernel, mode="same")
+
+
+# ==============================================================================
 # KINEMATIČNI SLEDILNIK
 # ==============================================================================
 
 class KinematicTracker:
-    def __init__(self, name, decay=0.85):
+    """
+    Sledilnik kinematičnih parametrov za eno točko.
+    Vgrajeno Gaussovo glajenje položajev (kavzalno, brez zakasnitve).
+    """
+
+    def __init__(self, name, decay=0.85, smoother=None):
         self.name     = name
         self.decay    = decay
-        self.prev_pos = None
-        self.prev_vel = 0.0
-        self.path_sum = 0.0
+        self.smoother = smoother   # KinematicSmoother ali None
+
+        self.prev_pos  = None
+        self.prev_vel  = 0.0
+        self.path_sum  = 0.0
+
         self.times = []; self.paths = []; self.vels = []; self.accs = []
         self.path_hist = deque(maxlen=100)
         self.vel_hist  = deque(maxlen=100)
         self.acc_hist  = deque(maxlen=100)
 
+        # Surovi (neglajeni) položaji – za post-process grafe
+        self._raw_positions = []
+
     def update(self, pos_px, dt, calibration=None):
-        d_px = _dist2d(pos_px, self.prev_pos) if self.prev_pos is not None else 0.0
+        """
+        pos_px: surova pozicija v pikslih (po undistortion)
+        Vrne (path_metric, vel_metric, acc_metric) – vrednosti na podlagi
+        glajene pozicije (če je smoother aktiven).
+        """
+        self._raw_positions.append(pos_px)
+
+        # Glajenje položaja
+        if self.smoother is not None:
+            pos = self.smoother.update(pos_px)
+        else:
+            pos = pos_px
+
+        d_px = _dist2d(pos, self.prev_pos) if self.prev_pos is not None else 0.0
         self.path_sum += d_px
-        curr_vel_px    = d_px / dt if self.prev_pos is not None else 0.0
-        acc_px         = (curr_vel_px - self.prev_vel) / dt if self.prev_pos is not None else 0.0
+
+        curr_vel_px = d_px / dt if self.prev_pos is not None else 0.0
+        acc_px      = (curr_vel_px - self.prev_vel) / dt if self.prev_pos is not None else 0.0
 
         if calibration is not None:
             path_m = calibration.pixel_to_mm(self.path_sum)
@@ -100,8 +218,9 @@ class KinematicTracker:
         else:
             path_m, vel_m, acc_m = self.path_sum, curr_vel_px, acc_px
 
-        self.prev_pos = pos_px
+        self.prev_pos = pos
         self.prev_vel = curr_vel_px
+
         self.paths.append(path_m); self.vels.append(vel_m); self.accs.append(acc_m)
         self.path_hist.append(path_m); self.vel_hist.append(vel_m); self.acc_hist.append(acc_m)
         return path_m, vel_m, acc_m
@@ -110,11 +229,24 @@ class KinematicTracker:
         lp = self.paths[-1] if self.paths else 0.0
         lv = self.vels[-1]  if self.vels  else 0.0
         la = self.accs[-1]  if self.accs  else 0.0
+        # Ohrani položaj v smootherju (ne dodaj nove točke – smoother ne sme "pozabiti")
         self.paths.append(lp); self.vels.append(lv*self.decay); self.accs.append(la*self.decay)
         self.path_hist.append(lp); self.vel_hist.append(lv*self.decay); self.acc_hist.append(0.0)
 
     def set_time(self, t):
         self.times.append(t)
+
+    def smoothed_vels(self):
+        """Post-process glajene hitrosti za grafe (ne vpliva na vrednosti v videu)."""
+        if self.smoother is not None:
+            return self.smoother.smooth_series_postprocess(self.vels)
+        return np.array(self.vels)
+
+    def smoothed_accs(self):
+        """Post-process glajeni pospeški za grafe."""
+        if self.smoother is not None:
+            return self.smoother.smooth_series_postprocess(self.accs)
+        return np.array(self.accs)
 
 
 # ==============================================================================
@@ -340,42 +472,33 @@ def draw_roi(frame, x1, y1, x2, y2):
 
 
 # ==============================================================================
-# HUD – nov dizajn: spodnji pas, brez grafov
+# HUD – spodnji pas
 # ==============================================================================
 
 def draw_kinematic_hud(frame,
                        hand_tracker, thumb_tracker, index_tracker,
                        calibrated=False,
                        is_grasping=False,
-                       pinch_dist=None):
+                       pinch_dist=None,
+                       smooth_sigma=None):
     """
     Horizontalni HUD pas na dnu slike.
     Trije bloki (Zapestje | Palec | Kazalec), vsak z x / v / a vrednostmi.
-    Brez mini grafov. Brez [ZAK]/[PRIJEM] statusov.
-    Prikazuje [KALIBRIRANO] samo ob uspešni kalibraciji.
     """
     h_frame, w_frame = frame.shape[:2]
+    pad_h   = 80
+    pad_top = 6
+    bar_y   = h_frame - pad_h
 
-    # Dimenzije pasu
-    pad_h   = 80   # višina pasu
-    pad_top = 6    # notranja zgornja margina
-
-    # Koordinate pasu – povsem na dnu
-    bar_y = h_frame - pad_h
-
-    # Prosojno ozadje
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, bar_y), (w_frame, h_frame), (20, 20, 20), -1)
     frame = cv2.addWeighted(overlay, 0.72, frame, 0.28, 0)
-
-    # Tenka ločilna črta na vrhu pasu
     cv2.line(frame, (0, bar_y), (w_frame, bar_y), (80, 80, 80), 1)
 
     ud = "mm"    if calibrated else "px"
     uv = "mm/s"  if calibrated else "px/s"
     ua = "mm/s²" if calibrated else "px/s²"
 
-    # Vrednosti
     hx = hand_tracker.paths[-1]  if hand_tracker.paths  else 0.0
     hv = hand_tracker.vels[-1]   if hand_tracker.vels   else 0.0
     ha = hand_tracker.accs[-1]   if hand_tracker.accs   else 0.0
@@ -386,12 +509,11 @@ def draw_kinematic_hud(frame,
     iv = index_tracker.vels[-1]  if index_tracker.vels  else 0.0
     ia = index_tracker.accs[-1]  if index_tracker.accs  else 0.0
 
-    # Trije enako široki bloki
     block_w = w_frame // 3
     blocks = [
-        ("ZAPESTJE", hx, hv, ha, (220, 220, 220)),   # bela
-        ("PALEC",    tx, tv, ta, (60,  160, 255)),    # oranžna (BGR)
-        ("KAZALEC",  ix, iv, ia, (220, 120,  30)),    # modra (BGR)
+        ("ZAPESTJE", hx, hv, ha, (220, 220, 220)),
+        ("PALEC",    tx, tv, ta, (60,  160, 255)),
+        ("KAZALEC",  ix, iv, ia, (220, 120,  30)),
     ]
 
     font_label = cv2.FONT_HERSHEY_SIMPLEX
@@ -399,20 +521,15 @@ def draw_kinematic_hud(frame,
 
     for col, (label, xv, vv, av, color) in enumerate(blocks):
         bx = col * block_w
-
-        # Navpična ločilna črta med bloki
         if col > 0:
             cv2.line(frame, (bx, bar_y+4), (bx, h_frame-4), (70, 70, 70), 1)
+        cx = bx + block_w // 2
 
-        cx = bx + block_w // 2  # sredina bloka
-
-        # Ime točke (naslov bloka)
         label_size = cv2.getTextSize(label, font_label, 0.42, 1)[0]
         cv2.putText(frame, label,
                     (cx - label_size[0]//2, bar_y + pad_top + 14),
                     font_label, 0.42, color, 1, cv2.LINE_AA)
 
-        # Vrednosti x / v / a v eni vrstici
         line1 = "x:{:.0f} {}".format(xv, ud)
         line2 = "v:{:.0f} {}   a:{:.0f} {}".format(vv, uv, av, ua)
 
@@ -426,21 +543,30 @@ def draw_kinematic_hud(frame,
                     (cx - l2_size[0]//2, bar_y + pad_top + 58),
                     font_label, 0.37, (180, 180, 180), 1, cv2.LINE_AA)
 
-    # [KALIBRIRANO] – samo ob kalibraciji, zgoraj levo v pasu
+    # Status vrstice – levo
+    status_y = bar_y + pad_top + 14
+    status_x = 8
     if calibrated:
         cv2.putText(frame, "KALIB.",
-                    (8, bar_y + pad_top + 14),
+                    (status_x, status_y),
                     font_label, 0.35, (0, 200, 80), 1, cv2.LINE_AA)
+        status_y += 14
+        
+    '''    
+    if smooth_sigma is not None:
+        cv2.putText(frame, "GLAJEN(s={:.1f})".format(smooth_sigma),
+                    (status_x, status_y),
+                    font_label, 0.30, (180, 180, 60), 1, cv2.LINE_AA)
+        status_y += 12
+    '''
 
-    # Pinch indikator – majhen krog spodaj desno v pasu (zelena=prijem, siva=odprto)
+    # Pinch indikator – desno
     if pinch_dist is not None:
-        thr     = PINCH_THRESHOLD_MM if calibrated else PINCH_THRESHOLD_PX
         p_color = (0, 210, 80) if is_grasping else (200, 0, 0)
         p_label = "PRIJEM" if is_grasping else "ODPRTO"
         cv2.putText(frame, p_label,
                     (8, bar_y + pad_top - 20),
                     font_label, 0.35, p_color, 1, cv2.LINE_AA)
-        # Pinch razdalja
         cv2.putText(frame, "pinch: {:.0f}{}".format(pinch_dist, "mm" if calibrated else "px"),
                     (8, bar_y + pad_top - 10),
                     font_label, 0.33, (140, 140, 140), 1, cv2.LINE_AA)
@@ -473,19 +599,16 @@ def draw_hand_skeleton(frame, hand_landmarks, width, height,
                 cv2.FONT_HERSHEY_SIMPLEX,0.55,lc2,2,cv2.LINE_AA)
 
     if active and in_roi:
-        # Palec – oranžen krog
         tp  = hand_landmarks[IDX_THUMB_TIP]
         tpx = (int(tp.x*width), int(tp.y*height))
         cv2.circle(frame, tpx, 7, (60,160,255), 2)
         cv2.putText(frame,"P",(tpx[0]+6,tpx[1]-6),cv2.FONT_HERSHEY_SIMPLEX,0.4,(60,160,255),1,cv2.LINE_AA)
 
-        # Kazalec – moder krog
         ip  = hand_landmarks[IDX_INDEX_TIP]
         ipx = (int(ip.x*width), int(ip.y*height))
         cv2.circle(frame, ipx, 7, (220,120,30), 2)
         cv2.putText(frame,"K",(ipx[0]+6,ipx[1]-6),cv2.FONT_HERSHEY_SIMPLEX,0.4,(220,120,30),1,cv2.LINE_AA)
 
-        # Linija palec–kazalec
         pinch_color = (0,210,80) if is_grasping else (120,120,120)
         cv2.line(frame, tpx, ipx, pinch_color, 1)
 
@@ -499,6 +622,11 @@ def save_kinematic_graphs(output_graph_path,
                           hand_tracker, thumb_tracker, index_tracker,
                           pinch_events, pinch_distances,
                           calibrated=False):
+    """
+    Shrani PNG graf s 4 subplot-i.
+    Hitrosti in pospeški so prikazani v post-process glajeni obliki
+    (če je smoother aktiven), surova krivulja je dodana kot tanka polprosojnica.
+    """
     if not MATPLOTLIB_OK:
         return
 
@@ -506,28 +634,49 @@ def save_kinematic_graphs(output_graph_path,
     uv = "mm/s"  if calibrated else "px/s"
     ua = "mm/s²" if calibrated else "px/s²"
 
-    t   = np.array(times)
-    fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+    t = np.array(times)
+    n = len(t)
+
+    fig, axes = plt.subplots(4, 1, figsize=(13, 11), sharex=True)
     fig.suptitle("Kinematični parametri – 9HPT", fontsize=13, fontweight="bold")
 
-    axes[0].plot(t, hand_tracker.paths,  color="black",   lw=1.5, label="Roka (zapestje)")
-    axes[0].plot(t, thumb_tracker.paths, color="#E07000", lw=1.2, label="Palec (konica)",   alpha=0.85)
-    axes[0].plot(t, index_tracker.paths, color="#0060C0", lw=1.2, label="Kazalec (konica)", alpha=0.85)
-    axes[0].set_ylabel("Pot [{}]".format(ud)); axes[0].legend(fontsize=8,loc="upper left"); axes[0].grid(True,alpha=0.3)
+    # --- 1. Pot ---
+    ax = axes[0]
+    ax.plot(t, hand_tracker.paths[:n],  color="black",   lw=1.5, label="Roka (zapestje)")
+    ax.plot(t, thumb_tracker.paths[:n], color="#E07000", lw=1.2, label="Palec (konica)",   alpha=0.85)
+    ax.plot(t, index_tracker.paths[:n], color="#0060C0", lw=1.2, label="Kazalec (konica)", alpha=0.85)
+    ax.set_ylabel("Pot [{}]".format(ud)); ax.legend(fontsize=8,loc="upper left"); ax.grid(True,alpha=0.3)
 
-    axes[1].plot(t, hand_tracker.vels,  color="black",   lw=1.2, label="Roka")
-    axes[1].plot(t, thumb_tracker.vels, color="#E07000", lw=1.0, label="Palec",   alpha=0.85)
-    axes[1].plot(t, index_tracker.vels, color="#0060C0", lw=1.0, label="Kazalec", alpha=0.85)
-    axes[1].set_ylabel("Hitrost [{}]".format(uv)); axes[1].legend(fontsize=8,loc="upper left"); axes[1].grid(True,alpha=0.3)
+    # --- 2. Hitrost (glajeno + surovo) ---
+    ax = axes[1]
+    for tracker, clr_raw, clr_sm, lbl in [
+        (hand_tracker,  "#909090", "black",   "Roka"),
+        (thumb_tracker, "#F0A050", "#E07000", "Palec"),
+        (index_tracker, "#5090D0", "#0060C0", "Kazalec"),
+    ]:
+        raw = np.array(tracker.vels[:n])
+        sm  = tracker.smoothed_vels()[:n]
+        #ax.plot(t[:len(raw)], raw, color=clr_raw, lw=0.6, alpha=0.35)
+        ax.plot(t[:len(sm)],  sm,  color=clr_sm,  lw=1.3, label=lbl)
+    ax.set_ylabel("Hitrost [{}]".format(uv)); ax.legend(fontsize=8,loc="upper left"); ax.grid(True,alpha=0.3)
 
-    axes[2].plot(t, hand_tracker.accs,  color="black",   lw=1.2, label="Roka")
-    axes[2].plot(t, thumb_tracker.accs, color="#E07000", lw=1.0, label="Palec",   alpha=0.85)
-    axes[2].plot(t, index_tracker.accs, color="#0060C0", lw=1.0, label="Kazalec", alpha=0.85)
-    axes[2].set_ylabel("Pospešek [{}]".format(ua)); axes[2].legend(fontsize=8,loc="upper left"); axes[2].grid(True,alpha=0.3)
+    # --- 3. Pospešek (glajeno + surovo) ---
+    ax = axes[2]
+    for tracker, clr_raw, clr_sm, lbl in [
+        (hand_tracker,  "#909090", "black",   "Roka"),
+        (thumb_tracker, "#F0A050", "#E07000", "Palec"),
+        (index_tracker, "#5090D0", "#0060C0", "Kazalec"),
+    ]:
+        raw = np.array(tracker.accs[:n])
+        sm  = tracker.smoothed_accs()[:n]
+        #ax.plot(t[:len(raw)], raw, color=clr_raw, lw=0.6, alpha=0.35)
+        ax.plot(t[:len(sm)],  sm,  color=clr_sm,  lw=1.3, label=lbl)
+    ax.set_ylabel("Pospešek [{}]".format(ua)); ax.legend(fontsize=8,loc="upper left"); ax.grid(True,alpha=0.3)
 
+    # --- 4. Pinch ---
     ax4 = axes[3]
     if pinch_distances:
-        pd  = np.array(pinch_distances[:len(t)])
+        pd  = np.array(pinch_distances[:n])
         ax4.plot(t[:len(pd)], pd, color="#008060", lw=1.2, label="Pinch razdalja")
         thr = PINCH_THRESHOLD_MM if calibrated else PINCH_THRESHOLD_PX
         ax4.axhline(thr, color="gray", lw=0.8, ls="--", label="Prag ({} {})".format(thr, ud))
@@ -541,6 +690,13 @@ def save_kinematic_graphs(output_graph_path,
     ax4.set_ylabel("Pinch [{}]".format(ud)); ax4.set_xlabel("Čas [s]")
     ax4.legend(fontsize=8,loc="upper right"); ax4.grid(True,alpha=0.3)
 
+    # Opomba o glajenju
+    sm_note = ""
+    if hand_tracker.smoother is not None:
+        sm_note = "  [Glajeno: {} σ={:.1f}]".format(
+            hand_tracker.smoother.method.upper(), hand_tracker.smoother.sigma)
+    fig.text(0.99, 0.01, sm_note, ha="right", va="bottom", fontsize=8, color="gray")
+
     plt.tight_layout()
     plt.savefig(output_graph_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -552,7 +708,8 @@ def save_kinematic_graphs(output_graph_path,
 # ==============================================================================
 
 def process_video(input_path, output_path, show_roi=True, birds_eye=False,
-                  bev_out_w=600, bev_out_h=600, bev_scale_px_per_mm=2.0):
+                  bev_out_w=600, bev_out_h=600, bev_scale_px_per_mm=2.0,
+                  smooth_sigma=1.5, smooth_method="gauss"):
     download_model()
 
     camera_name = detect_camera_from_filename(input_path)
@@ -569,6 +726,19 @@ def process_video(input_path, output_path, show_roi=True, birds_eye=False,
             print("  [OPOZORILO] Kalibracija za '{}' ni najdena.".format(camera_name))
     else:
         print("  [INFO] Kamera ni prepoznana – pikselske enote.")
+
+    # Smoother
+    use_smooth = smooth_sigma > 0.0
+    if use_smooth:
+        print("  Glajenje: {} σ={:.1f} (okno={})".format(
+            smooth_method.upper(), smooth_sigma,
+            max(3, int(4*smooth_sigma)+1)))
+        smoother_h = KinematicSmoother(sigma=smooth_sigma, method=smooth_method)
+        smoother_t = KinematicSmoother(sigma=smooth_sigma, method=smooth_method)
+        smoother_i = KinematicSmoother(sigma=smooth_sigma, method=smooth_method)
+    else:
+        print("  Glajenje: IZKLOPLJENO")
+        smoother_h = smoother_t = smoother_i = None
 
     # Bird's-eye (zakomentirano)
     '''
@@ -590,9 +760,9 @@ def process_video(input_path, output_path, show_roi=True, birds_eye=False,
     detector = vision.HandLandmarker.create_from_options(options)
 
     hand_selector  = ActiveHandSelector(history_len=20, lock_after=30)
-    hand_tracker   = KinematicTracker("roka")
-    thumb_tracker  = KinematicTracker("palec")
-    index_tracker  = KinematicTracker("kazalec")
+    hand_tracker   = KinematicTracker("roka",    smoother=smoother_h)
+    thumb_tracker  = KinematicTracker("palec",   smoother=smoother_t)
+    index_tracker  = KinematicTracker("kazalec", smoother=smoother_i)
     pinch_detector = PinchDetector()
 
     cap = cv2.VideoCapture(input_path)
@@ -683,6 +853,7 @@ def process_video(input_path, output_path, show_roi=True, birds_eye=False,
             calibrated=calibrated,
             is_grasping=pinch_detector.is_grasping,
             pinch_dist=pinch_detector.distances[-1] if pinch_detector.distances else None,
+            smooth_sigma=smooth_sigma if use_smooth else None,
         )
 
         # Bird's-eye (zakomentirano)
@@ -712,6 +883,8 @@ def process_video(input_path, output_path, show_roi=True, birds_eye=False,
             f.write("Pixels/mm: {:.4f}\n".format(calibration.pixels_per_mm))
         f.write("ROI: ({},{})-({},{}) px\n".format(rx1,ry1,rx2,ry2))
         f.write("Zaklep roke: {}\n".format("DA" if hand_selector.locked else "NE"))
+        f.write("Glajenje: {} sigma={:.2f}\n".format(
+            smooth_method.upper() if use_smooth else "NE", smooth_sigma))
         f.write("Dogodki prijema/odlaganja: {}\n".format(len(pinch_detector.events)))
         for ev in pinch_detector.events:
             f.write("  {}: t={:.3f}s  frame={}  dist={:.1f}\n".format(
@@ -723,14 +896,24 @@ def process_video(input_path, output_path, show_roi=True, birds_eye=False,
         f.write("cas[s];pot_roka[{u}];v_roka[{v}];a_roka[{a}];"
                 "pot_palec[{u}];v_palec[{v}];a_palec[{a}];"
                 "pot_kazalec[{u}];v_kazalec[{v}];a_kazalec[{a}];pinch[{u}]\n".format(u=ud,v=uv,a=ua))
-        n=min(len(times),len(hand_tracker.paths),len(thumb_tracker.paths),len(index_tracker.paths))
+        n_rows=min(len(times),len(hand_tracker.paths),len(thumb_tracker.paths),len(index_tracker.paths))
         pd=pinch_detector.distances
-        for i in range(n):
+        # Post-process glajene serije za CSV
+        hv_sm = hand_tracker.smoothed_vels();  ha_sm = hand_tracker.smoothed_accs()
+        tv_sm = thumb_tracker.smoothed_vels(); ta_sm = thumb_tracker.smoothed_accs()
+        iv_sm = index_tracker.smoothed_vels(); ia_sm = index_tracker.smoothed_accs()
+        for i in range(n_rows):
             f.write("{:.3f};{:.2f};{:.2f};{:.2f};{:.2f};{:.2f};{:.2f};{:.2f};{:.2f};{:.2f};{:.2f}\n".format(
                 times[i],
-                hand_tracker.paths[i], hand_tracker.vels[i],  hand_tracker.accs[i],
-                thumb_tracker.paths[i],thumb_tracker.vels[i], thumb_tracker.accs[i],
-                index_tracker.paths[i],index_tracker.vels[i], index_tracker.accs[i],
+                hand_tracker.paths[i],
+                float(hv_sm[i]) if i<len(hv_sm) else hand_tracker.vels[i],
+                float(ha_sm[i]) if i<len(ha_sm) else hand_tracker.accs[i],
+                thumb_tracker.paths[i],
+                float(tv_sm[i]) if i<len(tv_sm) else thumb_tracker.vels[i],
+                float(ta_sm[i]) if i<len(ta_sm) else thumb_tracker.accs[i],
+                index_tracker.paths[i],
+                float(iv_sm[i]) if i<len(iv_sm) else index_tracker.vels[i],
+                float(ia_sm[i]) if i<len(ia_sm) else index_tracker.accs[i],
                 pd[i] if i<len(pd) else 0.0))
 
     graph_path = os.path.join(GRAPH_DIR, bn+"_graf.png")
@@ -760,22 +943,43 @@ def get_mp4_files_recursively(data_dir):
 # ==============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="9HPT analiza – kinematika roke, palca in kazalca.")
-    parser.add_argument("--input","-i",required=True,
-                        help="Pot do .mp4 ali 'all' za vse videe v data/")
-    parser.add_argument("--output","-o",required=False,
-                        help="Izhodni .mp4 (samo za en video)")
-    parser.add_argument("--no-calibration",action="store_true",help="Brez kalibracije")
-    parser.add_argument("--no-roi",        action="store_true",help="Skrij ROI")
-    parser.add_argument("--roi",nargs=4,type=float,metavar=("X1","Y1","X2","Y2"),
-                        help="Ročni ROI kot deleži: --roi 0.1 0.2 0.75 0.95")
-    parser.add_argument("--lock-after",type=int,default=30,
-                        help="Zaklep roke po N okvirjih (privzeto: 30)")
-    parser.add_argument("--birds-eye",action="store_true",help="Bird's-eye view")
-    parser.add_argument("--bev-size",nargs=2,type=int,default=[600,600],metavar=("W","H"))
-    parser.add_argument("--bev-scale",type=float,default=2.0,help="px/mm za BEV")
-    parser.add_argument("--pinch-thr-mm",type=float,default=PINCH_THRESHOLD_MM)
-    parser.add_argument("--pinch-thr-px",type=float,default=PINCH_THRESHOLD_PX)
+    parser = argparse.ArgumentParser(
+        description="9HPT analiza – kinematika roke, palca in kazalca z Gaussovim glajenjem.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument("--input",  "-i", required=True,
+                        help="Pot do vhodne .mp4 datoteke ali 'all' za vse videe v data/")
+    parser.add_argument("--output", "-o", required=False,
+                        help="Pot do izhodne .mp4 datoteke (samo pri obdelavi enega videa)")
+    parser.add_argument("--no-calibration", action="store_true",
+                        help="Onemogoči kalibracijo – vsi izračuni v pikslih")
+    parser.add_argument("--no-roi", action="store_true",
+                        help="Skrij ROI pravokotnik na izhodnem videu")
+    parser.add_argument("--roi", nargs=4, type=float, metavar=("X1","Y1","X2","Y2"),
+                        help="Ročni ROI kot deleži slike (0.0–1.0), npr.: --roi 0.1 0.2 0.75 0.95")
+    parser.add_argument("--lock-after", type=int, default=30,
+                        help="Zaklep aktivne roke po N okvirjih (privzeto: 30)")
+    parser.add_argument("--birds-eye", action="store_true",
+                        help="Vstavi bird's-eye view vstavek (zahteva homografijo iz kalibracije)")
+    parser.add_argument("--bev-size", nargs=2, type=int, default=[600,600], metavar=("W","H"),
+                        help="Velikost bird's-eye platna v pikslih (privzeto: 600 600)")
+    parser.add_argument("--bev-scale", type=float, default=2.0,
+                        help="Merilo bird's-eye pogleda v px/mm (privzeto: 2.0)")
+    parser.add_argument("--pinch-thr-mm", type=float, default=PINCH_THRESHOLD_MM,
+                        help="Prag pinch razdalje v mm pri kalibriranem načinu (privzeto: {})".format(PINCH_THRESHOLD_MM))
+    parser.add_argument("--pinch-thr-px", type=float, default=PINCH_THRESHOLD_PX,
+                        help="Prag pinch razdalje v pikslih brez kalibracije (privzeto: {})".format(PINCH_THRESHOLD_PX))
+    parser.add_argument("--smooth-sigma", type=float, default=1.5,
+                        help=("Standardna deviacija Gaussovega glajenja položajev v okvirjih.\n"
+                              "  0.0 = glajenje izklopljeno\n"
+                              "  1.5 = privzeto (rahlo glajenje)\n"
+                              "  3.0 = močnejše glajenje\n"
+                              "Večja vrednost → bolj gladke krivulje, a manjša odzivnost."))
+    parser.add_argument("--smooth-method", type=str, default="gauss",
+                        choices=["gauss","savgol"],
+                        help=("Metoda post-process glajenja za grafe/CSV:\n"
+                              "  gauss  – Gaussova konvolucija (privzeto, brez scipy)\n"
+                              "  savgol – Savitzky-Golay filter (zahteva scipy)"))
 
     args = parser.parse_args()
 
@@ -797,12 +1001,24 @@ if __name__ == "__main__":
     if acal and not args.no_calibration: print("Kalibracije: {}".format(", ".join(acal)))
     elif args.no_calibration: print("Kalibracija onemogočena.")
     else: print("[INFO] Kalibracija ni na voljo – pikselske enote.")
+
+    if args.smooth_sigma > 0:
+        print("Glajenje: {} σ={:.1f}".format(args.smooth_method.upper(), args.smooth_sigma))
+        if args.smooth_method == "savgol" and not SCIPY_OK:
+            print("  [OPOZORILO] scipy ni nameščen – fallback na GAUSS.")
+    else:
+        print("Glajenje: IZKLOPLJENO")
     print()
 
     show_roi=not args.no_roi; bw,bh=args.bev_size
     def run(ip,op):
-        process_video(ip,op,show_roi=show_roi,birds_eye=args.birds_eye,
-                      bev_out_w=bw,bev_out_h=bh,bev_scale_px_per_mm=args.bev_scale)
+        process_video(ip, op,
+                      show_roi=show_roi,
+                      birds_eye=args.birds_eye,
+                      bev_out_w=bw, bev_out_h=bh,
+                      bev_scale_px_per_mm=args.bev_scale,
+                      smooth_sigma=args.smooth_sigma,
+                      smooth_method=args.smooth_method)
 
     if args.input.lower()=="all":
         files=get_mp4_files_recursively(DATA_DIR)
