@@ -3,16 +3,17 @@ Kalibracijska skripta za vse tri kamere (left, mid, right).
 
 Uporaba:
     python calibration/scripts/calibrate.py
+    python calibration/scripts/calibrate.py --mode server
 
 Skripta poišče kalibracijske slike v:
-    calibration/left/   (leva kamera - camP_0)
-    calibration/mid/    (sredinska kamera - camP_1)
-    calibration/right/  (desna kamera - camP_2)
+    [local]  calibration/left/   (leva kamera - camP_0)
+    [local]  calibration/mid/    (sredinska kamera - camP_1)
+    [local]  calibration/right/  (desna kamera - camP_2)
+    [server] /media/FastDataMama/zigab/calibration_photos/cam_left_resized2/  itd.
 
 Izhodne kalibracijske konfiguracije se shranijo v:
-    calibration/conf/left_calibration.json
-    calibration/conf/mid_calibration.json
-    calibration/conf/right_calibration.json
+    [local]  calibration/conf/left_calibration.json  itd.
+    [server] /media/FastDataMama/matijap/calibration/conf/  itd.
 
 Šahovnica: privzeto 8x8 kvadratkov (7x7 notranjih kotov), velikost stranice 20mm.
 POZOR: Nastavi CHECKERBOARD_ROWS in CHECKERBOARD_COLS glede na svojo šahovnico!
@@ -24,6 +25,15 @@ import json
 import os
 import sys
 import glob
+import argparse
+
+# [CONFIG] Uvoz konfiguracije poti (opcijsko – deluje tudi brez config.py)
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+    import config as _cfg
+    _CFG_OK = True
+except ImportError:
+    _CFG_OK = False
 
 # ============================================================
 # PARAMETRI ŠAHOVNICE - PRILAGODI PO POTREBI!
@@ -35,7 +45,7 @@ CHECKERBOARD_ROWS = 6  # notranji koti po višini
 CHECKERBOARD_COLS = 9  # notranji koti po širini
 SQUARE_SIZE_MM = 20.0  # velikost stranice kvadratka v milimetrih
 
-# Direktoriji
+# Direktoriji (lokalne privzete vrednosti – prepisane z --mode server)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CAMERAS = {
     "left": os.path.join(BASE_DIR, "left"),
@@ -318,6 +328,38 @@ def validate_calibration(config, camera_name):
 
 def main():
     """Glavna funkcija za kalibracijo vseh treh kamer."""
+
+    # [CONFIG] Argumenti za način delovanja
+    parser = argparse.ArgumentParser(
+        description="Kalibracija kamer za 9HPT – Robotski vid"
+    )
+    parser.add_argument("--mode", type=str, default="local",
+                        choices=["local", "server"],
+                        help=("Način delovanja:\n"
+                              "  local  – lokalne relativne poti (privzeto)\n"
+                              "  server – absolutne poti na strežniku FastDataMama"))
+    args = parser.parse_args()
+
+    # [CONFIG] Posodobi poti glede na način
+    global CAMERAS, CONF_DIR
+    if _CFG_OK:
+        _paths = _cfg.get_paths(args.mode)
+        CONF_DIR = _paths["CALIBRATION_CONF_DIR"]
+        CAMERAS = {
+            "left":  _paths["CALIB_LEFT"],
+            "mid":   _paths["CALIB_MID"],
+            "right": _paths["CALIB_RIGHT"],
+        }
+        if args.mode == "server":
+            print("Način: STREŽNIK")
+            print("  Kalibracijske slike: {}".format(
+                os.path.dirname(_paths["CALIB_LEFT"])))
+            print("  Izhod konfig:       {}".format(CONF_DIR))
+        else:
+            print("Način: LOKALNO")
+    elif args.mode == "server":
+        print("[OPOZORILO] config.py ni najden – uporabljam lokalne poti.")
+
     print("=" * 60)
     print("KALIBRACIJA KAMER - Robotski vid izziv")
     print("=" * 60)
@@ -357,11 +399,11 @@ def main():
         print("     → Dodaj vec slik iz razlicnih kotov (priporoceno 10-20 slik)")
         print("  3. Poglej debug slike v: calibration/debug/")
         print("\nDodajte kalibracijske slike v ustrezne mape:")
-        print(f"  - Leva kamera (camP_0):     calibration/left/")
-        print(f"  - Sredinska kamera (camP_1): calibration/mid/")
-        print(f"  - Desna kamera (camP_2):     calibration/right/")
+        print(f"  - Leva kamera (camP_0):     {CAMERAS['left']}")
+        print(f"  - Sredinska kamera (camP_1): {CAMERAS['mid']}")
+        print(f"  - Desna kamera (camP_2):     {CAMERAS['right']}")
         print("\nZa izvedbo kalibracije znova zaženite:")
-        print("  python calibration/scripts/calibrate.py")
+        print("  python calibration/scripts/calibrate.py [--mode server]")
         sys.exit(1)
 
     return results
