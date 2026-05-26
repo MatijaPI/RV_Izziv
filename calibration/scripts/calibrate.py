@@ -333,27 +333,29 @@ def main():
     parser = argparse.ArgumentParser(
         description="Kalibracija kamer za 9HPT – Robotski vid"
     )
-    parser.add_argument("--mode", type=str, default="local",
+    parser.add_argument("--mode", type=str, default=None,       # None = samodejno iz RV_MODE env
                         choices=["local", "server"],
                         help=("Način delovanja:\n"
-                              "  local  – lokalne relativne poti (privzeto)\n"
-                              "  server – absolutne poti na strežniku FastDataMama"))
+                              "  local  – lokalne relativne poti\n"
+                              "  server – absolutne poti na strežniku FastDataMama\n"
+                              "  (privzeto: samodejno iz env RV_MODE ali zaznavanja /workspace)"))
     args = parser.parse_args()
 
     # [CONFIG] Posodobi poti glede na način
     global CAMERAS, CONF_DIR
     if _CFG_OK:
+        # Brez mode_override config.py samodejno zazna RV_MODE env spremenljivko
         _paths = _cfg.get_paths(args.mode)
-        CONF_DIR = _paths["CALIBRATION_CONF_DIR"]
+        CONF_DIR = _paths["calibration_conf"]                   # popravljeni ključ
         CAMERAS = {
-            "left":  _paths["CALIB_LEFT"],
-            "mid":   _paths["CALIB_MID"],
-            "right": _paths["CALIB_RIGHT"],
+            "left":  _paths["calib_photos"]["left"],            # popravljeni ključ
+            "mid":   _paths["calib_photos"]["mid"],             # popravljeni ključ
+            "right": _paths["calib_photos"]["right"],           # popravljeni ključ
         }
-        if args.mode == "server":
+        if _paths["mode"] == "server":
             print("Način: STREŽNIK")
             print("  Kalibracijske slike: {}".format(
-                os.path.dirname(_paths["CALIB_LEFT"])))
+                os.path.dirname(_paths["calib_photos"]["left"])))
             print("  Izhod konfig:       {}".format(CONF_DIR))
         else:
             print("Način: LOKALNO")

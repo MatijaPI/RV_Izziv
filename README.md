@@ -2,38 +2,42 @@
 
 Program za avtomatizirano analizo Testa devetih zatičev (9HPT) z uporabo računalniškega vida in strojnega učenja.
 
-## Priprava okolja 
+## Priprava okolja – strežnik
 
-**Lokalni zagon (Mac/PC):**
+### Docker build
+
+Iz mape `docker/` v projektu:
 ```bash
-docker build -t matijap_rv_lokalno -f docker/Dockerfile docker
-docker run -v "$(pwd):/workspace" -w /workspace matijap_rv_lokalno python src/main.py --input all
+cd /media/FastDataMama/matijap/RV_Izziv/docker
+docker build -t matija_rv_izziv .
 ```
-
-**Zagon na strežniku:**
-```bash
-docker build -t matijap_rv_server -f docker/Dockerfile docker/
-docker run --shm-size=16g -it \
-  -v /media/FastDataMama/matijap/:/workspace \
-  -v /media/FastDataMama/data_rv_26/:/data \
-  -w /workspace matijap_rv_server bash
-```
-
-Testni videi morajo biti shranjeni v mapi `data/`. Izhodni posnetki, logi in grafi se shranjujejo v `output/`.
-
----
 
 ## Kalibracija kamer
 
 Program podpira kalibracijo treh kamer za natančno preračunavanje kinematičnih parametrov v metrične enote (mm, mm/s, mm/s²).
 
-### Struktura kalibracijskih datotek
+### Postopek kalibracije na strežniku (Docker)
+
+```bash
+docker run -it \
+  --shm-size=16g \
+  -v /media/FastDataMama/matijap/RV_Izziv:/workspace \
+  -v /media/FastDataMama/zigab/calibration_photos:/calib_photos \
+  matija_rv_izziv \
+  python /workspace/calibration/scripts/calibrate.py
+```
+
+Kalibracijske slike so avtomatsko naložene iz mape na strežniku z mountom v Docker ukazu. Izhodni kalibracijski JSON-i se shranijo v `/workspace/calibration/conf/` in se avtomatsko uporabijo za obdelavo posnetkov. Izpisana je tudi primerjava z referenčnimi kalibracijskimi podatki.
+
+Debug slike z zaznanimi koti šahovnice se shranijo v `/workspace/calibration/debug/`.
+
+### Struktura kalibracijskih datotek (Lokalno)
 
 ```
 calibration/
-├── left/              # Kalibracijske slike za levo kamero (camP_0)
-├── mid/               # Kalibracijske slike za sredinsko kamero (camP_1)
-├── right/             # Kalibracijske slike za desno kamero (camP_2)
+├── left/              # Vstavi kalibracijske slike za levo kamero (camP_0)
+├── mid/               # Vstavi kalibracijske slike za sredinsko kamero (camP_1)
+├── right/             # Vstavi kalibracijske slike za desno kamero (camP_2)
 ├── scripts/
 │   └── calibrate.py   # Kalibracijska skripta
 ├── conf/              # Izhodne konfiguracijske datoteke (generirane)
@@ -43,7 +47,7 @@ calibration/
 └── calibration.json   # Validacijska/fallback datoteka
 ```
 
-### Izvedba kalibracije
+### Izvedba kalibracije (Lokalno)
 
 1. Dodajte kalibracijske slike (šahovnica 9x6, stranica 20mm) v ustrezne mape:
    - `calibration/left/` za levo kamero (camP_0)
@@ -64,9 +68,56 @@ calibration/
 - Če kalibracija ni na voljo, program deluje v pikselskem načinu (nazaj združljivo).
 - Fallback: če `calibration/conf/` ne obstaja, se uporabi `calibration/calibration.json`.
 
+## Obdelava posnetkov na strežniku (Docker)
+
+### Docker run 
+
+**En video:**
+```bash
+docker run -it \
+  --shm-size=16g \
+  -v /media/FastDataMama/matijap/RV_Izziv:/workspace \
+  -v /media/FastDataMama/data_rv_26:/data \
+  -v /media/FastDataMama/zigab/calibration_photos:/calib_photos \
+  matija_rv_izziv \
+  python /workspace/src/main.py --input patient_003/patient_003camP_0_20231005_14_13_43.mp4
+```
+Primer za video: patient_003camP_0_20231005_14_13_43.mp4, enako za ostale.
+
+**Vsi videi enega pacienta:**
+```bash
+docker run -it \
+  --shm-size=16g \
+  -v /media/FastDataMama/matijap/RV_Izziv:/workspace \
+  -v /media/FastDataMama/data_rv_26:/data \
+  -v /media/FastDataMama/zigab/calibration_photos:/calib_photos \
+  matija_rv_izziv \
+  python /workspace/src/main.py --input all --patient patient_001
+```
+Primer za mapo pacienta: patient001, enako za ostale.
+
+**Vsi videi vseh pacientov:**
+```bash
+docker run -it \
+  --shm-size=16g \
+  -v /media/FastDataMama/matijap/RV_Izziv:/workspace \
+  -v /media/FastDataMama/data_rv_26:/data \
+  -v /media/FastDataMama/zigab/calibration_photos:/calib_photos \
+  matija_rv_izziv \
+  python /workspace/src/main.py --input all
+```
+
+### Struktura mountov
+
+| Lokalna pot na strežniku | Znotraj containerja | Vsebina |
+|---|---|---|
+| `/media/FastDataMama/matijap/RV_Izziv` | `/workspace` | Projekt (koda, modeli, kalibracija, output) |
+| `/media/FastDataMama/data_rv_26` | `/data` | Vhodni videi (`/data/Data/patient_XXX/`) |
+| `/media/FastDataMama/zigab/calibration_photos` | `/calib_photos` | Kalibracijske slike po kamerah |
+
 ---
 
-## Uporaba CLI
+## Obdelava posnetkov (Lokalno)
 
 ### Osnovni primeri
 
@@ -110,12 +161,13 @@ python src/main.py --input test.mp4 --pinch-thr-mm 15.0
 |---|---|---|---|
 | `--input` | `-i` | — | **Obvezen.** Pot do vhodne `.mp4` datoteke ali `all` za obdelavo vseh videov v mapi `data/`. |
 | `--output` | `-o` | samodejno | Pot/ime izhodne `.mp4` datoteke. Uporablja se samo pri obdelavi enega videa. Če ni podano, se doda pripona `_obdelan`. |
+| `--patient IME` | — | — | Skupaj z `--input all` obdela samo videe izbranega pacienta, npr. `--patient patient_003`. |
 | `--no-calibration` | — | izklopljeno | Onemogoči uporabo kalibracijskih datotek. Vsi kinematični parametri se izračunajo v pikslih (px, px/s, px/s²). |
 | `--no-roi` | — | izklopljeno | Skrije ROI (Region of Interest) pravokotnik na izhodnem videu. |
 | `--roi X1 Y1 X2 Y2` | — | per kamera | Ročno nastavi ROI kot deleže slike (vrednosti med 0.0 in 1.0). Primer: `--roi 0.2 0.1 0.8 0.9`. Prepiše privzete ROI vrednosti za vse kamere. |
 | `--lock-after N` | — | `30` | Število okvirjev po katerih se zaklene izbira aktivne roke. Do tega trenutka se aktivna roka določa dinamično glede na gibanje. |
-| `--smooth-sigma σ` | — | `1.5` | Standardna deviacija Gaussovega glajenja položajev v okvirjih. Glajenje deluje kavzalno v realnem času (brez zakasnitve). Vrednost `0.0` glajenje izklopi. Priporočene vrednosti: `1.0`–`3.0`. |
-| `--smooth-method` | — | `gauss` | Metoda post-process glajenja za izvozne grafe in CSV. Možnosti: `gauss` (Gaussova konvolucija, brez dodatnih odvisnosti) ali `savgol` (Savitzky-Golay filter, zahteva `scipy`). |
+| `--smooth-sigma σ` | — | `1.5` | Standardna deviacija Gaussovega glajenja položajev v okvirjih. Glajenje deluje kavzalno v realnem času (brez zakasnitve). Vrednost `0.0` glajenje izklopi. |
+| `--smooth-method` | — | `gauss` | Metoda post-process glajenja za izvozne grafe in CSV. Možnosti: `gauss` (Gaussova konvolucija, brez dodatnih odvisnosti) ali `savgol` (Savitzky-Golay filter, zahteva scipy). |
 | `--birds-eye` | — | izklopljeno | Vstavi bird's-eye view vstavek v spodnji desni kot izhodnega videa. Zahteva homografijsko matriko iz kalibracije. |
 | `--bev-size W H` | — | `600 600` | Velikost bird's-eye platna v pikslih. |
 | `--bev-scale S` | — | `2.0` | Merilo bird's-eye pogleda v px/mm. |
@@ -145,10 +197,11 @@ Za vsak obdelan video se generirajo:
 - **Korak 5:** Zapisovanje dnevnika procesiranja za vsak video v mapo `output/logs/` (ime loga sledi izhodnemu videu), kar omogoča sledljivost ter enostavno preverjanje uspešne obdelave.
 - **Korak 6:** Izračun in izvoz časovnih vrst poti, hitrosti in pospeška zapestja v CSV.
 - **Korak 7:** Real-time prikaz poti, hitrosti in pospeška z mini grafi v overlay-ju na izhodnem videu.
-- **Korak 8:** Kalibracija kamer – podpora za tri kamere (left/mid/right), avtomatska prepoznava kamere iz imena datoteke, odstranitev distorzije, pretvorba kinematičnih parametrov v metrične enote (mm). Validacija s primerjavo z referenčno kalibracijo (max. 2% odstopanje).
+- **Korak 8:** Kalibracija kamer – podpora za tri kamere (left/mid/right), avtomatska prepoznava kamere iz imena datoteke, odstranitev distorzije, pretvorba kinematičnih parametrov v metrične enote.
 - **Korak 9:** Selekcija aktivne roke – ROI filter in `ActiveHandSelector` z zaklepom po N okvirjih za robustno sledenje v primerih, ko je v vidnem polju več rok (aktivna + neaktivna roka).
 - **Korak 10:** Kinematika palca in kazalca – ločeno sledenje konicama palca (landmark 4) in kazalca (landmark 8) z izračunom d/v/a za vsako točko posebej.
 - **Korak 11:** Zaznava prijema in odlaganja zatiča (`PinchDetector`) na podlagi razdalje palec–kazalec s pragom in potrditvijo v N zaporednih okvirjih.
 - **Korak 12:** Izvoz kinematičnih grafov v `output/graphs/` (matplotlib PNG, 4 subplot-i: pot, hitrost, pospešek, pinch razdalja).
 - **Korak 13:** Nov HUD dizajn – horizontalni pas na dnu videa s tremi bloki (Zapestje / Palec / Kazalec) in diskretnim pinch indikatorjem.
-- **Korak 14:** Gaussovo glajenje položajev – kavzalni `KinematicSmoother` za zanesljivejše določanje hitrosti in pospeškov brez zakasnitve v videu; post-process glajenje (Gauss/Savitzky-Golay) za izvozne grafe in CSV.
+- **Korak 14:** Gaussovo glajenje položajev – kavzalni `KinematicSmoother` za zanesljivejše določanje hitrosti in pospeškov brez zakasnitve v videu; post-process glajenje (Gauss/Savitzky-Golay) za grafe in CSV.
+- **Korak 15:** Podpora za strežniški/Docker način – `config.py` z avtomatskim zaznavanjem načina delovanja, ločeni monti za workspace/data/calib_photos, posodobitev Dockerfila z vsemi potrebnimi sistemskimi knjižnicami.
