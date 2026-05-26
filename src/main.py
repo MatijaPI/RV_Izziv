@@ -59,9 +59,9 @@ HAND_CONNECTIONS = [
 CAMERA_MAP = {"camP_0":"left","camP_1":"mid","camP_2":"right"}
 
 CAMERA_ROI = {
-    "left":  (0.25, 0.05, 0.75, 0.80),
-    "mid":   (0.25, 0.10, 0.75, 0.75),
-    "right": (0.20, 0.15, 0.75, 0.75),
+    "left":  (0.25, 0.05, 0.70, 0.85),
+    "mid":   (0.25, 0.10, 0.70, 0.80),
+    "right": (0.20, 0.15, 0.70, 0.80),
     None:    (1.0,  1.0,  1.0,  1.0),
 }
 
@@ -753,8 +753,8 @@ def process_video(input_path, output_path, show_roi=True, birds_eye=False,
     base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
     options = vision.HandLandmarkerOptions(
         base_options=base_options, num_hands=2,
-        min_hand_detection_confidence=0.3,
-        min_hand_presence_confidence=0.3,
+        min_hand_detection_confidence=0.25,
+        min_hand_presence_confidence=0.25,
         min_tracking_confidence=0.3,
     )
     detector = vision.HandLandmarker.create_from_options(options)
