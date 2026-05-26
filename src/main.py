@@ -27,22 +27,26 @@ try:
 except ImportError:
     SCIPY_OK = False
 
+# Uvoz konfiguracije poti (lokalni ali strežniški/Docker način)
+# Način se določi avtomatsko iz env RV_MODE ali prisotnosti /workspace + /data
+import config as _cfg
+
 # ==============================================================================
 # KONSTANTE IN KONFIGURACIJA
 # ==============================================================================
 
-DATA_DIR             = "data"
-OUTPUT_DIR           = "output/videos"
-GRAPH_DIR            = "output/graphs"
-LOG_DIR              = "output/logs"
-MODEL_DIR            = "models"
-MODEL_PATH           = os.path.join(MODEL_DIR, "hand_landmarker.task")
-CALIBRATION_CONF_DIR = "calibration/conf"
+# Poti – naložene iz config.py glede na način delovanja (local/server)
+# V __main__ jih je možno preglasiti z argumentom --mode local|server
+_active_paths        = _cfg.get_paths()
+DATA_DIR             = _active_paths["data_dir"]
+OUTPUT_DIR           = _active_paths["output_videos"]
+GRAPH_DIR            = _active_paths["output_graphs"]
+LOG_DIR              = _active_paths["output_logs"]
+MODEL_DIR            = _active_paths["model_dir"]
+MODEL_PATH           = _active_paths["model_path"]
+CALIBRATION_CONF_DIR = _active_paths["calibration_conf"]
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(GRAPH_DIR,  exist_ok=True)
-os.makedirs(LOG_DIR,    exist_ok=True)
-os.makedirs(MODEL_DIR,  exist_ok=True)
+# Mape se ustvarijo v __main__ (ne ob uvozu modula)
 
 IDX_WRIST     = 0
 IDX_THUMB_TIP = 4
@@ -372,8 +376,15 @@ def load_calibration_config(camera_name):
     if os.path.exists(cp):
         with open(cp,"r",encoding="utf-8") as f: config = json.load(f)
         print("  Naložena kalibracija iz: {}".format(cp)); return config
-    for fb in [os.path.join("calibration","calibration.json"),"calibration.json"]:
-        if os.path.exists(fb):
+
+    # Fallback: preveri pot iz config.py in klasični relativni poti
+    fallback_paths = [
+        _active_paths.get("calibration_json"),          # pot iz config.py
+        os.path.join("calibration","calibration.json"),
+        "calibration.json",
+    ]
+    for fb in fallback_paths:
+        if fb and os.path.exists(fb):
             with open(fb,"r",encoding="utf-8") as f: ac = json.load(f)
             if camera_name in ac:
                 ref = ac[camera_name]
@@ -551,8 +562,8 @@ def draw_kinematic_hud(frame,
                     (status_x, status_y),
                     font_label, 0.35, (0, 200, 80), 1, cv2.LINE_AA)
         status_y += 14
-        
-    '''    
+
+    '''
     if smooth_sigma is not None:
         cv2.putText(frame, "GLAJEN(s={:.1f})".format(smooth_sigma),
                     (status_x, status_y),
@@ -951,6 +962,12 @@ if __name__ == "__main__":
                         help="Pot do vhodne .mp4 datoteke ali 'all' za vse videe v data/")
     parser.add_argument("--output", "-o", required=False,
                         help="Pot do izhodne .mp4 datoteke (samo pri obdelavi enega videa)")
+    parser.add_argument("--mode", default=None, choices=["local","server"],
+                        help="Način delovanja: local ali server/Docker\n"
+                             "(privzeto: samodejno iz env RV_MODE ali zaznavanja /workspace)")
+    parser.add_argument("--patient", default=None,
+                        help="Obdelaj samo določenega pacienta, npr. --patient Pacient001\n"
+                             "(deluje skupaj z --input all)")
     parser.add_argument("--no-calibration", action="store_true",
                         help="Onemogoči kalibracijo – vsi izračuni v pikslih")
     parser.add_argument("--no-roi", action="store_true",
@@ -982,6 +999,22 @@ if __name__ == "__main__":
                               "  savgol – Savitzky-Golay filter (zahteva scipy)"))
 
     args = parser.parse_args()
+
+    # Nastavi način delovanja – --mode preglasi env RV_MODE in samodejno zaznavanje
+    if args.mode:
+        _new_paths = _cfg.get_paths(args.mode)
+        DATA_DIR             = _new_paths["data_dir"]
+        OUTPUT_DIR           = _new_paths["output_videos"]
+        GRAPH_DIR            = _new_paths["output_graphs"]
+        LOG_DIR              = _new_paths["output_logs"]
+        MODEL_DIR            = _new_paths["model_dir"]
+        MODEL_PATH           = _new_paths["model_path"]
+        CALIBRATION_CONF_DIR = _new_paths["calibration_conf"]
+        _cfg.ensure_output_dirs(_new_paths)
+        _cfg.print_config(_new_paths)
+    else:
+        _cfg.ensure_output_dirs(_active_paths)
+        _cfg.print_config(_active_paths)
 
     if args.roi:
         for cam in list(CAMERA_ROI.keys()): CAMERA_ROI[cam]=tuple(args.roi)
@@ -1021,8 +1054,17 @@ if __name__ == "__main__":
                       smooth_method=args.smooth_method)
 
     if args.input.lower()=="all":
-        files=get_mp4_files_recursively(DATA_DIR)
-        if not files: print("V '{}' ni mp4 datotek.".format(DATA_DIR))
+        # Če je podan --patient, išči samo v podmapi tega pacienta
+        if args.patient:
+            search_dir = os.path.join(DATA_DIR, args.patient)
+            if not os.path.isdir(search_dir):
+                print("Napaka: Mapa pacienta ne obstaja: {}".format(search_dir))
+                exit(1)
+            print("Iskanje videov za pacienta '{}' v: {}".format(args.patient, search_dir))
+        else:
+            search_dir = DATA_DIR
+        files=get_mp4_files_recursively(search_dir)
+        if not files: print("V '{}' ni mp4 datotek.".format(search_dir))
         for ip in files:
             run(ip, os.path.join(OUTPUT_DIR,
                 os.path.splitext(os.path.basename(ip))[0]+"_obdelan.mp4"))
